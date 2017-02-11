@@ -20,7 +20,7 @@ RUN curl -fLsS -o /usr/local/bin/dumb-init \
     && chmod +x /usr/local/bin/dumb-init
 
 RUN curl -fLsS -o /usr/local/src/mesos-0.23.0-py2.7-linux-x86_64.egg \
-    https://downloads.mesosphere.com/master/centos/7/mesos-0.23.0-py2.7-linux-x86_64.egg \
+    https://downloads.mesosphere.com/master/centos/7/mesos-0.27.0-py2.7-linux-x86_64.egg \
     && easy_install /usr/local/src/mesos-0.23.0-py2.7-linux-x86_64.egg
 
 ADD ./docker-entrypoint.sh /docker-entrypoint.sh
@@ -33,7 +33,7 @@ ENV APP_DIR /app
 RUN mkdir -p ${APP_DIR} \
 	&& chown -R nginx:nginx ${APP_DIR} \
 	&& chmod 777 /run/ -R \
-	&& chmod 750 /root/ -R
+	&& chmod 777 /root/ -R
 WORKDIR ${APP_DIR}
 
 # Listener API tcp port
