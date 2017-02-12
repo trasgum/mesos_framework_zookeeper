@@ -146,7 +146,7 @@ class MinimalScheduler(Scheduler):
         elif mesos_pb2.TaskState.Name(update.state) == "TASK_FAILED" \
                or mesos_pb2.TaskState.Name(update.state) == "TASK_FINISHED":
             try:
-                self.zoo_ids.append(self.launched_instances.pop(task_id))
+                self.zoo_ids.append(self.launched_instances.pop(task_id)['_id'])
             except KeyError:
                 pass
             try:
