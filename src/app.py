@@ -1,34 +1,56 @@
 #!flask/bin/python
+import json
+import urllib2
 from flask import Flask, jsonify
+from flask_zookeeper import FlaskZookeeperClient
+from config import Config
 from scheduler import scheduler_zookeeper as scheduler
 from threading import Thread
-import os
 
-tasks = [
-    {
-        'id': 1,
-        'title': u'Buy groceries',
-        'description': u'Milk, Cheese, Pizza, Fruit, Tylenol',
-        'done': False
-    },
-    {
-        'id': 2,
-        'title': u'Learn Python',
-        'description': u'Need to find a good Python tutorial on the web',
-        'done': False
-    }
-]
+
+def start_scheduler(zk_mesos_master):
+    thread_scheduler = Thread(target=scheduler.main, args=(zk_mesos_master,))
+    thread_scheduler.start()
+
+
+def check_scheduler_status():
+    tasks = dict()
+    mesos_master = dict()
+    if flask_zk_cli.connection is not None:
+        mesos_list = flask_zk_cli.connection.get_children('/mesos')
+        mesos_master = json.loads(flask_zk_cli.connection.get('/mesos/' + mesos_list[0])[0])
+
+    resp = urllib2.urlopen('http://' + mesos_master['hostname'] + ':' + str(mesos_master['port']) + '/state')
+    mesos_state = json.loads(resp.read())
+    running_tasks = [framework['tasks'] for framework in mesos_state['frameworks'] if framework['name'] == 'zk-framework']
+    if len(running_tasks) > 0:
+        tasks['zk-framework'] = {"state": "Running"}
+        for task in running_tasks[0]:
+            tasks['zk-framework'][task['id']] = {"state": task['state'], "name": task['name']}
+    else:
+        tasks['zk-framework'] = {"state": "Not running"}
+
+    return tasks
 
 
 app = Flask(__name__)
-thread = Thread(target=scheduler.main, args=("zk://10.141.141.10:2181/mesos",))
-thread.start()
+app.config.from_object(Config)
+flask_zk_cli = FlaskZookeeperClient(app)
+
 
 @app.route('/')
 @app.route('/api/v1/status', methods=['GET'])
 def status():
-    return jsonify({'tasks': tasks})
+    return jsonify(check_scheduler_status())
+
+
+@app.route('/api/v1/start', methods=['POST'])
+def start():
+    if check_scheduler_status()['zk-framework']['state'] == 'Not running':
+        start_scheduler('zk://' + app.config['KAZOO_HOSTS'] + '/mesos')
+        return jsonify({'status': 202})
+    else:
+        return jsonify({'status': 304})
 
 if __name__ == '__main__':
-    mesos_master = os.getenv("MESOS_MASTER")
     app.run(host='0.0.0.0', port=8000, debug=True)

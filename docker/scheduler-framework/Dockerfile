@@ -14,12 +14,13 @@ RUN dnf -y install \
       python2-flask \
 	  && pip2 install --upgrade pip
 
+RUN pip install kazoo flask-zookeeper urllib2
 # https://github.com/Yelp/dumb-init
 RUN curl -fLsS -o /usr/local/bin/dumb-init \
     https://github.com/Yelp/dumb-init/releases/download/v1.0.2/dumb-init_1.0.2_amd64 \
     && chmod +x /usr/local/bin/dumb-init
 
-RUN curl -fLsS -o /usr/local/src/mesos-0.23.0-py2.7-linux-x86_64.egg \
+RUN curl -fLsS -o /usr/local/src/mesos-0.27.0-py2.7-linux-x86_64.egg \
     https://downloads.mesosphere.com/master/centos/7/mesos-0.27.0-py2.7-linux-x86_64.egg \
     && easy_install /usr/local/src/mesos-0.27.0-py2.7-linux-x86_64.egg
 

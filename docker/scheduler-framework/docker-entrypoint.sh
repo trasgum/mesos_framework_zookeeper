@@ -1,4 +1,8 @@
 #!/bin/bash
+
+ZK_NUM_INSTANCES=${ZK_NUM_INSTANCES:=3}
+ZK_HOST=${ZK_HOST:="172.17.0.3:2181"}
+
 if [ ! -f /debug0 ]; then
 	if [ -e requirements.txt ]; then
 		pip2 install -r requirements.txt
