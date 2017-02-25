@@ -4,13 +4,6 @@ import urllib2
 from flask import Flask, jsonify
 from flask_zookeeper import FlaskZookeeperClient
 from config import Config
-from scheduler import scheduler_zookeeper as scheduler
-from threading import Thread
-
-
-def start_scheduler(zk_mesos_master):
-    thread_scheduler = Thread(target=scheduler.main, args=(zk_mesos_master,))
-    thread_scheduler.start()
 
 
 def check_scheduler_status():
@@ -44,13 +37,13 @@ def status():
     return jsonify(check_scheduler_status())
 
 
-@app.route('/api/v1/start', methods=['POST'])
-def start():
-    if check_scheduler_status()['zk-framework']['state'] == 'Not running':
-        start_scheduler('zk://' + app.config['KAZOO_HOSTS'] + '/mesos')
-        return jsonify({'status': 202})
-    else:
-        return jsonify({'status': 304})
+# @app.route('/api/v1/start', methods=['POST'])
+# def start():
+#     if check_scheduler_status()['zk-framework']['state'] == 'Not running':
+#         start_scheduler('zk://' + app.config['KAZOO_HOSTS'] + '/mesos')
+#         return jsonify({'status': 202})
+#     else:
+#         return jsonify({'status': 304})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
