@@ -8,7 +8,6 @@ from threading import Thread
 def main():
     from scheduler.zookeeper_driver import ZookeeperDriver
     from scheduler.zookeer_rest import RESTServer
-    from addict import Dict
 
     def signal_handler(signal, frame):
         driver.stop()
@@ -43,22 +42,6 @@ def main():
         logging.info("Driver waiting to connect...")
         time.sleep(5)
 
-    logging.debug("Request port 33101 as a test")
-    try:
-        resources = list()
-        rest_port = Dict()
-        rest_port.name = 'ports'
-        rest_port.type = 'RANGES'
-        ranges = list()
-        rest_range = Dict()
-        rest_range.begin = 33101
-        rest_range.end = 33102
-        ranges.append(rest_range)
-        resources.append(ranges)
-        driver.requestResources(resources)
-    except Exception as err:
-        logging.exception("Error requesting port 33101".format(err))
-
     logging.info("Starting zookeeper rest ...")
     rest_thread = Thread(name='rest', target=run_rest_thread, args=())
     rest_thread.start()
@@ -89,4 +72,6 @@ if __name__ == '__main__' and __package__ is None:
                 export ZK_MESOS_URL=leader.mesos:5050
                 ''')
         sys.exit(1)
+    except Exception as err:
+        print("Something went wrong: {}".format(err))
 

@@ -7,6 +7,7 @@ from multiprocessing import Process
 from threading import Thread
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 from zookeeper_driver import ZookeeperDriver
+from addict import Dict
 
 logging.basicConfig(level=os.getenv("FW_LOG_LEVEL", logging.DEBUG),
                     format='[%(asctime)s %(levelname)s %(module)s:%(funcName)s] %(message)s'
@@ -19,6 +20,7 @@ class RESTHandler(BaseHTTPRequestHandler):
     server_version = "zookeeper-framework/0.1.0"
     sys_version = ""
     mesos_url = os.getenv('ZK_MESOS_URL')
+    zk_framework_name = os.getenv('ZK_FW_NAME', 'zk-framework')
     try:
         logging.debug("Connecting to zookeeper")
         zk_con_rest = ZookeeperDriver.initialize_zk_con(mesos_url)
@@ -32,7 +34,7 @@ class RESTHandler(BaseHTTPRequestHandler):
                 response = {"error": "Not Found"}
                 self.send_response(404, 'Not Found')
             else:
-                response = self.check_scheduler_status(self.zk_con_rest)
+                response = self.check_scheduler_status(self.zk_con_rest, self.zk_framework_name)
                 self.send_response(200, 'OK')
 
             message = json.dumps(response, ensure_ascii=True, encoding='UTF-8')
@@ -48,9 +50,10 @@ class RESTHandler(BaseHTTPRequestHandler):
         return
 
     @staticmethod
-    def check_scheduler_status(zk_conn):
+    def check_scheduler_status(zk_conn, zk_framework_name):
         tasks_dict = dict()
         mesos_master = dict()
+        zk_framework = Dict()
         try:
             logging.debug("Reading mesos master {}".format(zk_conn))
             mesos_list = zk_conn.get_children('/mesos')
@@ -59,18 +62,22 @@ class RESTHandler(BaseHTTPRequestHandler):
         except Exception as err:
             # TODO[trasgum] handle zookeeper connection
             logging.exception("Error reading mesos master: {}".format(err))
-            raise SystemExit
+            # raise SystemExit
 
         try:
             logging.debug("Reading mesos status")
             resp = urllib2.urlopen('http://' + mesos_master['hostname'] + ':' + str(mesos_master['port']) + '/state')
             mesos_state = json.loads(resp.read())
-            running_tasks = [framework['tasks'] for framework in mesos_state['frameworks'] if
-                             framework['name'] == 'zk-framework']
-            if len(running_tasks) > 0:
-                tasks_dict['zk-framework'] = {"state": "Running"}
-                for task in running_tasks[0]:
-                    tasks_dict['zk-framework'][task['id']] = {"state": task['state'], "name": task['name']}
+            for framework in mesos_state['frameworks']:
+                if framework['name'] == zk_framework_name :
+                    zk_framework = Dict(framework)
+
+            if len(zk_framework.tasks) > 0:
+                tasks_dict[zk_framework_name] = {"state": "Running",
+                                                 "id": zk_framework.id
+                                                 }
+                for task in zk_framework.tasks:
+                    tasks_dict[zk_framework_name][task['id']] = {"state": task['state'], "name": task['name']}
             else:
                 tasks_dict['zk-framework'] = {"state": "Not running"}
 

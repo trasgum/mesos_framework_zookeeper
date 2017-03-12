@@ -5,6 +5,10 @@ from flask import Flask, jsonify
 from flask_zookeeper import FlaskZookeeperClient
 from config import Config
 
+# def start_scheduler(zk_mesos_master):
+#     thread_scheduler = Thread(target=scheduler.main, args=(zk_mesos_master,))
+#     thread_scheduler.start()
+
 
 def check_scheduler_status():
     tasks = dict()
