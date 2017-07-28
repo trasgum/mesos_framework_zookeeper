@@ -1,4 +1,3 @@
-import os
 import logging
 import signal
 import time
@@ -26,13 +25,13 @@ def main():
         while driver_thread.is_alive():
             rest.handle_request()
 
-    logging.basicConfig(level=os.getenv("FW_LOG_LEVEL", logging.DEBUG),
+    logging.basicConfig(level=getenv("FW_LOG_LEVEL", logging.DEBUG),
                         format='[%(asctime)s %(levelname)s %(module)s:%(funcName)s] %(message)s'
                         )
     log = logging.getLogger(__name__)
 
     logging.info("Starting zookeeper framework ...")
-    driver = ZookeeperDriver(os.getenv('ZK_MESOS_URL')).get_driver()
+    driver = ZookeeperDriver(getenv('ZK_MESOS_URL')).get_driver()
     log.info("Starting zookeeper driver")
     driver_thread = Thread(name='driver', target=run_driver_thread, args=())
     driver_thread.start()
@@ -59,11 +58,11 @@ def main():
 
 
 if __name__ == '__main__' and __package__ is None:
-    from os import sys, path
+    from os import sys, path, getenv
     sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
 
     try:
-        assert os.getenv('ZK_MESOS_URL')
+        assert getenv('ZK_MESOS_URL')
         main()
     except AssertionError as err:
         print("Usage: " + path.basename(__file__) + " ZK_MESOS_URL env var not found" +

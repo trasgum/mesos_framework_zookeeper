@@ -1,14 +1,14 @@
 import getpass
 import logging
-import os
+from os import getenv
+import os.path as path
 
 from addict import Dict
 from kazoo.client import KazooClient
 from pymesos import MesosSchedulerDriver
-
 from zookeeper_scheduler import ZookeeperScheduler
 
-logging.basicConfig(level=os.getenv("FW_LOG_LEVEL", logging.DEBUG),
+logging.basicConfig(level=getenv("FW_LOG_LEVEL", logging.DEBUG),
                     format='[%(asctime)s %(levelname)s %(module)s:%(funcName)s] %(message)s'
                     )
 log = logging.getLogger(__name__)
@@ -18,20 +18,21 @@ log = logging.getLogger(__name__)
 class ZookeeperDriver(object):
     def __init__(self, mesos_url):
         self.mesos_url = mesos_url
-        self.framework_name = os.getenv('ZK_FW_NAME', 'zk-framework')
-        self.framework_role = os.getenv('ZK_FW_ROLE', self.framework_name + '-r')
+        self.framework_name = getenv('ZK_FW_NAME', 'zk-framework')
+        self.framework_role = getenv('ZK_FW_ROLE', self.framework_name + '-r')
         self.executor_name = self.framework_name
-        self.framework_url = os.getenv('ZK_FW_URL', 'http://' + self.framework_name + '.mesos:8000/')
-        self.num_instances = os.getenv('ZK_FW_NUM_INSTANCES', 3)
-        self.principal = os.getenv('ZK_FW_PRINCIPAL')
-        self.secret = os.getenv('ZK_FW_SECRET')
+        self.framework_url = getenv('ZK_FW_URL', 'http://' + self.framework_name + '.mesos:8000/')
+        self.num_instances = getenv('ZK_FW_NUM_INSTANCES', 3)
+        self.principal = getenv('ZK_FW_PRINCIPAL')
+        self.secret = getenv('ZK_FW_SECRET')
         self.zk_conn = None
         self.driver_thread = None
         self.zk_resources = Dict()
-        self.zk_resources.cpu = float(os.getenv("ZK_FW_CPU", 0.1))
-        self.zk_resources.mem = float(os.getenv('ZK_FW_MEM', 128))
-        self.zk_resources.disk_data = float(os.getenv('ZK_FW_DISK_DATA', 100))
-        self.zk_resources.disk_log = float(os.getenv('ZK_FW_DISK_LOG', 100))
+        self.zk_resources.cpu = float(getenv("ZK_FW_CPU", 0.1))
+        self.zk_resources.mem = float(getenv('ZK_FW_MEM', 128))
+        self.zk_resources.disk_data = float(getenv('ZK_FW_DISK_DATA', 100))
+        self.zk_resources.disk_log = float(getenv('ZK_FW_DISK_LOG', 100))
+        self.driver = None
 
         if self.num_instances not in [1, 3, 5]:
             raise Exception("The number of istances must be 1, 3 or 5")
@@ -39,12 +40,11 @@ class ZookeeperDriver(object):
     def get_driver(self):
         self.zk_conn = self.initialize_zk_con(self.mesos_url)
         logging.debug("Connection stablished with zookeeper: {}".format(self.zk_conn.state))
-        self.zk_conn.ensure_path(os.path.join('/', self.framework_name, 'instances'))
+        self.zk_conn.ensure_path(path.join('/', self.framework_name, 'instances'))
 
         executor = Dict()
         executor.executor_id.value = self.executor_name
         executor.name = executor.executor_id.value
-        # executor.command.value = os.path.abspath('./executor-minimal.py')
 
         framework = Dict()
         framework.user = getpass.getuser()  # the current user
@@ -64,6 +64,7 @@ class ZookeeperDriver(object):
             self.driver = MesosSchedulerDriver(
                 ZookeeperScheduler(executor,
                                    principal=self.principal,
+                                   role=self.framework_role,
                                    instances=self.num_instances,
                                    zk_resources=self.zk_resources,
                                    zk_driver=self.zk_conn
@@ -79,6 +80,7 @@ class ZookeeperDriver(object):
             self.driver = MesosSchedulerDriver(
                 ZookeeperScheduler(executor,
                                    principal=self.framework_name,
+                                   role=self.framework_role,
                                    instances=self.num_instances,
                                    zk_resources=self.zk_resources,
                                    zk_driver=self.zk_conn
@@ -94,7 +96,6 @@ class ZookeeperDriver(object):
     def stop(self):
         self.driver.stop()
 
-
     @staticmethod
     def initialize_zk_con(url):
         zk_host = url.split('/')[2]
@@ -105,4 +106,3 @@ class ZookeeperDriver(object):
         zk_conn = KazooClient(zk_host)
         zk_conn.start()
         return zk_conn
-

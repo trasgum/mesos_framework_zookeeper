@@ -1,12 +1,13 @@
 #!/usr/bin/env python2.7
 from __future__ import print_function
 
-from os.path import join
+import os.path as path
 from os import getenv
 import logging
 import uuid
 import json
 from pymesos import Scheduler
+from utils import get_mesos_master, get_mesos_slaves_status
 from addict import Dict
 
 logging.basicConfig(level=getenv("FW_LOG_LEVEL", logging.DEBUG),
@@ -16,122 +17,81 @@ log = logging.getLogger(__name__)
 
 FOREVER = 0xFFFFFFFF
 
+
 class ZookeeperScheduler(Scheduler):
-    def __init__(self, executor, principal, instances, zk_resources, zk_driver):
+    def __init__(self, executor, principal, role, instances, zk_resources, zk_driver):
+        # Refactor -> Read reserved_resources from mesos_master
+        # Check if all resources have been reserved
+        ## Reserve all non reserved resources
+        # Launch tasks from offers with reserved resources
+
         self.executor = executor
         self.principal = principal
+        self.role = role
         self.num_instances = instances
+        self.zk_resources = zk_resources
         self.zk_conn = zk_driver
         self.running_instances = dict()
         self.launched_instances = dict()
-        # TODO get reserved resources from zk_driver else Dict()
         self.reserved_resources = list()
-        self.zoo_ids = map(lambda x: x+1, range(instances))
-        self.zk_resources = zk_resources
+        self.zoo_ids = set(map(lambda x: x+1, range(instances)))
+
+        mesos_master_dict = get_mesos_master(self.zk_conn)
+        mesos_state = get_mesos_slaves_status(mesos_master_dict)
+
+        for slave in mesos_state['slaves']:
+            try:
+                resources = slave['reserved_resources_full'][self.role]
+                self.reserved_resources.append(
+                    {"agent_hostname": slave['hostname'], "resources": resources})
+                self.remove_zoo_ids(resources)
+            except KeyError:
+                log.info("Slave {} does not have reserved resources".format(slave['id']))
+                pass
 
     def registered(self, driver, framework_id, master_info):
         log.info("Registered with framework id: {}".format(framework_id.value))
 
     def resourceOffers(self, driver, offers):
-        tasks_to_launch = Dict()
+        tasks_to_launch = list()
 
         log.debug("Launched instances: {}".format(len(self.running_instances) + len(self.launched_instances)))
 
+        # Refactor
         for offer in offers:
             # log.debug("Received offer {}".format(json.dumps(offer, indent=2)))
             log.info("Received offer with ID: {}".format(offer.id.value))
-
-            cpus, mem, gpus, port_ranges = self.get_resources(offer)
-            zk_task_port_range = [(_range[0], _range[0] + 2) for _range in port_ranges
-                                  if len(range(_range[0], _range[1], 1)) >= 2][0]
 
             if len(self.running_instances) + len(self.launched_instances) >= self.num_instances:
                 log.info("Offer {}: DECLINED: all task are running".format(offer.id.value))
                 driver.declineOffer(offer.id, filters=self._filters(FOREVER))
                 continue
 
-            if len(self.zoo_ids) > 0:
-                log.debug("Reserving resources...")
-                if offer.url.address.hostname in [reserved_resource['agent_hostname'] for reserved_resource
-                                                    in self.reserved_resources]:
-                    # log.debug("reserved_resources: {}".format(self.reserved_resources))
-                    log.info("Offer {}: DECLINED: this host have already resources in agent {}".format(
-                                                                                                  offer.id.value,
-                                                                                                  offer.url.address.hostname
-                                                                                                ))
-                    driver.declineOffer(offer.id)
-                    continue
+            log.info("Filtering non reserved resources")
+            filtered_offer = offer.copy()
+            map(lambda x: filtered_offer.resources.remove(x),
+                filter(lambda resource: resource['reservation'] == {},
+                       (resource for resource in filtered_offer.resources)))
 
-                elif (cpus < self.zk_resources.cpu
-                        or mem < self.zk_resources.mem):
-                    #TODO: add disk resources to condition
-                    log.info("Offer {}: DECLINED: offer does not complain min requirements: cpus: {}, mem: {}".format(
-                                                                                                                    offer.id.value,
-                                                                                                                    cpus,
-                                                                                                                    mem
-                                                                                                                     ))
-                    driver.declineOffer(offer.id)
-                    continue
-                elif len(zk_task_port_range) is not 2:
-                    log.info("Offer {}: DECLINED: offer does not complain min requirements: three consecutive ports".format(
-                        offer.id.value
-                    ))
-                    driver.declineOffer(offer.id)
-                    continue
-                else:
-                    #TODO: add disk resources
-                    log.debug("Zookeeper required resources: cpu: {}, mem: {} and {} offered ports".format(
-                                                                                self.zk_resources.cpu * self.num_instances,
-                                                                                self.zk_resources.mem * self.num_instances,
-                                                                                self.num_instances * 3
-                                                                                ))
+            if filtered_offer.resources:
+                if filtered_offer['agent']['hostname'] not in [resources['agent_hostname']
+                                                               for resources in self.reserved_resources]:
+                    log.info("Saving already reserved resources to reserved_resources")
+                    self.reserved_resources.append(
+                        {"agent_hostname": filtered_offer.url.address.hostname, "resources": filtered_offer.resources})
+                    self.remove_zoo_ids(filtered_offer.resources)
 
-                    zoo_id = self.zoo_ids.pop()
-                    log.info("Reserving zookeeper resources to task id: {} from offer {}".format(
-                        zoo_id,
-                        offer.id.value
-                    ))
-                    resources = self.zookeeper_resources(zoo_id, zk_task_port_range)
-                    self.reserve_zookeeper_resources(offer, resources, driver)
-                    self.reserved_resources.append({"agent_hostname": offer.url.address.hostname, "resources": resources})
-                    self.__write_status_in_zookeeper(self.zk_conn,
-                                                     join('/', self.executor.name, '/resources'),
-                                                     json.dumps(self.reserved_resources, ensure_ascii=True))
-
+                log.info("Creating task from already reserved resources")
+                task = self.zookeeper_task(offer['slave_id']['value'], filtered_offer.resources)
+                tasks_to_launch.append({"offer": offer, "task": task})
             else:
-                log.info("All resources reserved, num reservations: {}".format(len(self.reserved_resources)))
-                log.debug("Filtering non reserved resources")
-                filtered_offer = offer.copy()
-                map(lambda x: filtered_offer.resources.remove(x),
-                    filter(lambda resource: resource['reservation'] == {},
-                           (resource for resource in filtered_offer.resources)))
-
-                if filtered_offer.resources:
-                    cpus_reservation, \
-                    mem_reservation, \
-                    gpus_reservation, \
-                    port_ranges_reservation = self.get_reservation_info(filtered_offer)
-
-                    if cpus_reservation.principal == self.principal \
-                            and mem_reservation.principal == self.principal \
-                            and port_ranges_reservation.principal == self.principal:
-
-                        log.debug("All resources have {} princiapl assigned".format(self.principal))
-                        for label in cpus_reservation.labels.labels:
-                            if label.key == "zoo_id":
-                                zoo_id = label.value
-
-                        # log.debug("offer: {}".format(json.dumps(offer, indent=2)))
-                        log.info("Creating task for zookeeper: {} from offer {}".format(zoo_id, offer.id.value))
-                        tasks_to_launch[zoo_id] = {
-                                                    "task": self.zookeeper_task(offer.agent_id.value,
-                                                                                cpus,
-                                                                                mem,
-                                                                                zk_task_port_range,
-                                                                                zoo_id
-                                                                                ),
-                                                    "offer": offer
-                                                   }
+                if len(self.reserved_resources) < self.num_instances:
+                    log.info("Reserving resources...")
+                    zoo_id = self.zoo_ids.pop()
+                    self.reserved_resources.append(self.reserve_resources(offer, zoo_id, self.zk_conn))
+                else:
+                    log.info("Offer {}: Declined all resources were reserved")
+                    driver.declineOffer(offer.id)
 
         if len(tasks_to_launch) > 0:
             log.info("Launching {} tasks".format(len(tasks_to_launch)))
@@ -173,15 +133,14 @@ class ZookeeperScheduler(Scheduler):
             zoo_id = self.launched_instances.pop(task_id)
             self.running_instances[task_id] = zoo_id
             self.__write_status_in_zookeeper(self.zk_conn,
-                                             join('/', self.executor.name, '/instances'),
+                                             path.join('/', self.executor.name, '/instances'),
                                              json.dumps(self.running_instances, ensure_ascii=True)
                                              )
 
         elif update.state == "TASK_FAILED" or update.state == "TASK_FINISHED":
-            # self.zoo_ids.append(self.running_instances.pop(task_id)['_id'])
             self.running_instances.pop(task_id)
             self.__write_status_in_zookeeper(self.zk_conn,
-                                             join('/', self.executor.name, '/instances'),
+                                             path.join('/', self.executor.name, '/instances'),
                                              json.dumps(self.running_instances, ensure_ascii=True)
                                              )
 
@@ -195,7 +154,70 @@ class ZookeeperScheduler(Scheduler):
                                                                         len(self.launched_instances)
                                                                         ))
 
-    def zookeeper_resources(self, zoo_id, zk_task_port_range):
+    def reserve_resources(self, offer, zoo_id, driver):
+        cpus, mem, gpus, port_ranges = self.get_resources(offer)
+        zk_task_port_range = [(_range[0], _range[0] + 2) for _range in port_ranges
+                              if len(range(_range[0], _range[1], 1)) >= 2][0]
+
+        if offer.url.address.hostname in [reserved_resource['agent_hostname'] for reserved_resource
+                                          in self.reserved_resources]:
+            # log.debug("reserved_resources: {}".format(self.reserved_resources))
+            log.info("Offer {}: DECLINED: the agent {} have already reserved resources".format(
+                offer.id.value,
+                offer.url.address.hostname
+            ))
+            driver.declineOffer(offer.id)
+
+        elif cpus < self.zk_resources.cpu:
+            log.info("Offer {}: DECLINED: offer does not complain min requirements: cpus: {}".format(
+                offer.id.value,
+                cpus
+            ))
+            driver.declineOffer(offer.id)
+
+        elif mem < self.zk_resources.mem:
+            log.info("Offer {}: DECLINED: offer does not complain min requirements: mem: {}".format(
+                offer.id.value,
+                mem
+            ))
+            driver.declineOffer(offer.id)
+
+        elif len(zk_task_port_range) is not 2:
+            log.info("Offer {}: DECLINED: offer does not complain min requirements: three consecutive ports".format(
+                offer.id.value
+            ))
+            driver.declineOffer(offer.id)
+        # TODO: add disk resources to condition
+        else:
+            log.info("Reserving zookeeper resources to task id: {} from offer {}".format(
+                zoo_id,
+                offer.id.value
+            ))
+            resources = self.zookeeper_task_resources(zoo_id,
+                                                      self.principal,
+                                                      self.role,
+                                                      self.zk_resources.cpu,
+                                                      self.zk_resources.mem,
+                                                      zk_task_port_range,
+                                                      self.zk_resources.disk_data,
+                                                      self.zk_resources.disk_log
+                                                      )
+            self.reserveResources(offer, resources, driver)
+            return {"agent_hostname": offer.url.address.hostname, "resources": resources}
+            # self.__write_status_in_zookeeper(self.zk_conn,
+            #                                  join('/', self.executor.name, '/resources'),
+            #                                 json.dumps(self.reserved_resources, ensure_ascii=True))
+
+    @staticmethod
+    def zookeeper_task_resources(zoo_id,
+                                 principal,
+                                 role,
+                                 task_cpu,
+                                 task_mem,
+                                 task_port_range,
+                                 task_disk_data_size,
+                                 task_disk_log_size):
+
         resources = list()
         labels = list()
         reservation = Dict()
@@ -206,66 +228,51 @@ class ZookeeperScheduler(Scheduler):
         labels.append(label_zoo_id)
         reservation.labels.labels = labels
 
-        reservation.principal = self.principal
+        reservation.principal = principal
 
-        log.debug("Reserving {} cpu(s)".format(self.zk_resources.cpu))
         cpus = Dict()
         cpus.name = 'cpus'
         cpus.type = 'SCALAR'
-        cpus.scalar.value = self.zk_resources.cpu
-        cpus.role = "zk-framework-r"
+        cpus.scalar.value = task_cpu
+        cpus.role = role
         cpus.reservation = reservation
         resources.append(cpus)
 
-        log.debug("Reserving {} MB of mem".format(self.zk_resources.mem))
         mem = Dict()
         mem.name = 'mem'
         mem.type = 'SCALAR'
-        mem.scalar.value = self.zk_resources.mem
-        mem.role = "zk-framework-r"
+        mem.scalar.value = task_mem
+        mem.role = role
         mem.reservation = reservation
         resources.append(mem)
 
-        log.debug("Reserving {} MB of disk for disk data".format(self.zk_resources.disk_data))
         disk_d = Dict()
         disk_d.name = 'disk'
         disk_d.type = 'SCALAR'
-        disk_d.scalar.value = self.zk_resources.disk_data
-        disk_d.role = "zk-framework-r"
-        # label_disk_data = Dict()
-        # label_disk_data.key = "disk"
-        # label_disk_data.value = "data"
-        # labels.append(label_disk_data)
-        # reservation.labels.labels = labels
+        disk_d.scalar.value = task_disk_data_size
+        disk_d.role = role
         disk_d.reservation = reservation
         resources.append(disk_d)
 
-        log.debug("Reserving {} MB of disk for disk log".format(self.zk_resources.disk_log))
         disk_l = Dict()
         disk_l.name = 'disk'
         disk_l.type = 'SCALAR'
-        disk_l.scalar.value = self.zk_resources.disk_data
-        disk_l.role = "zk-framework-r"
-        # label_disk_log = Dict()
-        # label_disk_log.key = "disk"
-        # label_disk_log.value = "log"
-        # labels.append(label_disk_log)
-        # reservation.labels.labels = labels
+        disk_l.scalar.value = task_disk_log_size
+        disk_l.role = role
         disk_d.reservation = reservation
         resources.append(disk_d)
 
         disk_l.reservation = reservation
         resources.append(disk_l)
 
-        log.debug("Reserving {} to {} ports".format(zk_task_port_range[0], zk_task_port_range[1]))
         task_ports = Dict()
         range_list = list()
         task_ports.name = 'ports'
         task_ports.type = 'RANGES'
-        task_ports.role = "zk-framework-r"
+        task_ports.role = role
         _range = Dict(
-            begin=zk_task_port_range[0],
-            end=zk_task_port_range[1]
+            begin=task_port_range[0],
+            end=task_port_range[1]
         )
         range_list.append(_range)
         task_ports.ranges = Dict(
@@ -276,7 +283,11 @@ class ZookeeperScheduler(Scheduler):
 
         return resources
 
-    def zookeeper_task(self, agent_id, offered_cpu, offered_mem, offered_ports, zoo_id):
+    def zookeeper_task(self, agent_id, resources):
+        zoo_id = self.get_zoo_id_label(resources)[0]
+        # TODO implement
+        # zk_client_port = get_port_range_from_resources(resources)
+
         task = Dict()
         task_id = str(uuid.uuid4())
         task.task_id.value = task_id
@@ -292,11 +303,11 @@ class ZookeeperScheduler(Scheduler):
         #for i in map(lambda x: x+1, range(self.num_instances)):
         #    zoo_servers += "server." + str(i) + "=zookeeper-" + str(i) + "." + self.executor.name + ".mesos:2888:3888 "
 
-        zoo_servers = self.get_cluster_string(offered_ports, zoo_id)
+        zoo_servers = self.get_cluster_string()
 
         self.__add_environment_variable(environments, key="ZOO_SERVERS", value=zoo_servers.strip())
         self.__add_environment_variable(environments, key="ZOO_MY_ID", value=str(zoo_id))
-        self.__add_environment_variable(environments, key="ZOO_PORT", value=str(offered_ports[0]))
+        self.__add_environment_variable(environments, key="ZOO_PORT", value=str(zk_client_port))
         log.debug("VARS: {}".format([var for var in environments]))
 
         command.environment.variables = environments
@@ -313,91 +324,35 @@ class ZookeeperScheduler(Scheduler):
         volumes = list()
         self.__add_docker_volume(volumes, container_path="/data", host_path="/var/zookeeper/data", mode="RW")
         self.__add_docker_volume(volumes, container_path="/datalog", host_path="/var/zookeeper/datalog", mode="RW")
-
         docker.volumes = volumes
 
-        # parameters = list()
-        # dns = Dict()
-        # dns.key = "--dns"
-        # dns.value = "[172.17.0.2, 8.8.8.8, 8.8.4.4]"
-        # parameters.append(dns)
-        #
-        # dns_search = Dict()
-        # dns_search.key = "--dns-search"
-        # dns_search.value = "mesos"
-        # parameters.append(dns_search)
-
-        # docker.parameters = parameters
         container.docker = docker
         task.container = container
-
-
-
-        logging.debug("CPUS: {}, MEM: {}".format(self.zk_resources.cpu, self.zk_resources.mem))
-
-
-        resources = list()
-        labels = list()
-        reservation = Dict()
-
-        label_zoo_id = Dict()
-        label_zoo_id.key = "zoo_id"
-        label_zoo_id.value = str(zoo_id)
-        labels.append(label_zoo_id)
-        reservation.labels.labels = labels
-
-        reservation.principal = self.principal
-
-        cpus = Dict()
-        cpus.name = 'cpus'
-        cpus.type = 'SCALAR'
-        cpus.scalar.value = self.zk_resources.cpu
-        cpus.role = "zk-framework-r"
-        cpus.reservation = reservation
-        resources.append(cpus)
-
-        mem = Dict()
-        mem.name = 'mem'
-        mem.type = 'SCALAR'
-        mem.scalar.value = self.zk_resources.mem
-        mem.role = "zk-framework-r"
-        mem.reservation = reservation
-        resources.append(mem)
-
-        task_ports = Dict()
-        range_list = list()
-        task_ports.name = 'ports'
-        task_ports.type = 'RANGES'
-        task_ports.role = "zk-framework-r"
-        _range = Dict(
-            begin=offered_ports[0],
-            end=offered_ports[1]
-        )
-        range_list.append(_range)
-        task_ports.ranges = Dict(
-            range=range_list
-        )
-        task_ports.reservation = reservation
-        resources.append(task_ports)
-
         task.resources = resources
         return task
 
-    def get_cluster_string(self, offered_ports, zoo_id):
+    def remove_zoo_ids(self, resources):
+        filter(lambda x: x not in self.get_zoo_id_label(resources), self.zoo_ids)
+
+    def get_cluster_string(self, resources):
         cluster_string = ""
-        # for zoo_id in self.reserved_resources:
-            # ports = [resource for resource in zoo_id.resources if resource.name is "ports"]
-        lport = offered_ports[0] + 1
-        eport = offered_ports[0] + 2
-        cluster_string += "server." + str(zoo_id) + "=zookeeper-" + str(zoo_id) \
-                          + "." + self.executor.name \
-                          + ".mesos:" \
-                          + str(lport) + ":" \
-                          + str(eport)
+        # TODO implement
+        list_zoo_ids = self.get_zoo_id_label(resources)
+        for zoo_id in list_zoo_ids:
+            zk_client_port = get_port_range_from_resources(zoo_id, resources)
+            # for zoo_id in self.reserved_resources:
+                # ports = [resource for resource in zoo_id.resources if resource.name is "ports"]
+            lport = zk_client_port + 1
+            eport = zk_client_port + 2
+            cluster_string += "server." + str(zoo_id) + "=zookeeper-" + str(zoo_id) \
+                              + "." + executor_name \
+                              + ".mesos:" \
+                              + str(lport) + ":" \
+                              + str(eport)
         return cluster_string
 
     @staticmethod
-    def reserve_zookeeper_resources(offer, resources, driver):
+    def reserveResources(offer, resources, driver):
         reserve_operation = [Dict(
             type='RESERVE',
             reserve=Dict(
@@ -413,11 +368,11 @@ class ZookeeperScheduler(Scheduler):
         return f
 
     @staticmethod
-    def __add_environment_variable(list_environemnts, key, value):
+    def __add_environment_variable(list_environments, key, value):
         environment = Dict()
         environment.name = key
         environment.value = value
-        list_environemnts.append(environment)
+        list_environments.append(environment)
 
     @staticmethod
     def __add_docker_volume(volumes, container_path, host_path, mode):
@@ -429,14 +384,14 @@ class ZookeeperScheduler(Scheduler):
         else:
             raise AttributeError('Invalid volume mode')
             # volume.mode = 1  # mesos_pb2.Volume.Mode.RW
-            # volume_data.mode = 2 # mesos_pb2.Volume.Mode.RO
+            # volume.mode = 2 # mesos_pb2.Volume.Mode.RO
         volumes.append(volume)
 
     @staticmethod
     def __write_status_in_zookeeper(zk_con, path, json_data):
         try:
-            zk_con.ensure_path(join('/', path))
-            zk_con.set(join('/', path), json_data)
+            zk_con.ensure_path(path.join('/', path))
+            zk_con.set(path.join('/', path), json_data)
         except Exception as err:
             log.error("Status cannot be written to zookeeper: {}".format(err))
 
@@ -475,3 +430,17 @@ class ZookeeperScheduler(Scheduler):
                reservation_mem, \
                reservation_gpu, \
                reservation_ports
+
+    @staticmethod
+    def get_zoo_id_label(resources):
+        resource_zoo_ids = list()
+        labels = (label['reservation']['labels'] for label in (resource for resource in resources))
+        for label in labels:
+            for l in label['labels']:
+                if l['key'] == 'zoo_id':
+                    resource_zoo_ids.append(l['value'])
+        set_zoo_ids = set(resource_zoo_ids)
+        return set_zoo_ids if len(set_zoo_ids) == 1 else list()
+
+
+

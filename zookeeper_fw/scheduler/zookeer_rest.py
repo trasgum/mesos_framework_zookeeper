@@ -4,9 +4,9 @@ import json
 import urllib2
 import logging
 from multiprocessing import Process
-from threading import Thread
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 from zookeeper_driver import ZookeeperDriver
+from utils import get_mesos_master, get_mesos_master_status
 from addict import Dict
 
 logging.basicConfig(level=os.getenv("FW_LOG_LEVEL", logging.DEBUG),
@@ -34,7 +34,8 @@ class RESTHandler(BaseHTTPRequestHandler):
                 response = {"error": "Not Found"}
                 self.send_response(404, 'Not Found')
             else:
-                response = self.check_scheduler_status(self.zk_con_rest, self.zk_framework_name)
+                mesos_master_info = get_mesos_master(self.zk_con_rest)
+                response = self.check_scheduler_status(mesos_master_info, self.zk_framework_name)
                 self.send_response(200, 'OK')
 
             message = json.dumps(response, ensure_ascii=True, encoding='UTF-8')
@@ -50,24 +51,14 @@ class RESTHandler(BaseHTTPRequestHandler):
         return
 
     @staticmethod
-    def check_scheduler_status(zk_conn, zk_framework_name):
+    def check_scheduler_status(mesos_master_dict, zk_framework_name):
         tasks_dict = dict()
-        mesos_master = dict()
         zk_framework = Dict()
-        try:
-            logging.debug("Reading mesos master {}".format(zk_conn))
-            mesos_list = zk_conn.get_children('/mesos')
-            logging.debug("Received /mesos tree: {}".format(mesos_list))
-            mesos_master = json.loads(zk_conn.get('/mesos/' + mesos_list[0])[0])
-        except Exception as err:
-            # TODO[trasgum] handle zookeeper connection
-            logging.exception("Error reading mesos master: {}".format(err))
-            # raise SystemExit
 
         try:
             logging.debug("Reading mesos status")
-            resp = urllib2.urlopen('http://' + mesos_master['hostname'] + ':' + str(mesos_master['port']) + '/state')
-            mesos_state = json.loads(resp.read())
+            mesos_state = get_mesos_master_status(mesos_master_dict)
+
             for framework in mesos_state['frameworks']:
                 if framework['name'] == zk_framework_name :
                     zk_framework = Dict(framework)
